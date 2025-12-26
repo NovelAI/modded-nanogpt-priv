@@ -1,0 +1,16 @@
+{
+    "configurations": [
+        {
+            "name": "Train GPT (single-device)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "train_gpt",
+            "env": {
+                "RANK": "0",
+                "LOCAL_RANK": "0",
+                "WORLD_SIZE": "1",
+                // "TORCH_COMPILE_DISABLE": "1",
+            }
+        },
+    ]
+}
