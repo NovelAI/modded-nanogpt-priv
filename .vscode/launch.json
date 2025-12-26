@@ -8,15 +8,26 @@
             "env": {
                 "RANK": "0",
                 "LOCAL_RANK": "0",
-                "WORLD_SIZE": "1",
-                // "TORCH_COMPILE_DISABLE": "1",
+                "WORLD_SIZE": "8",
+                "TORCH_COMPILE_DISABLE": "1",
             }
+        },
+        {
+            "name": "Cached Fineweb 10B (900M toks)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "data.cached_fineweb10B",
+            "args": ["9"],
         },
         {
             "name": "Benchmark Attention",
             "type": "debugpy",
             "request": "launch",
-            "module": "bench_attn"
+            "module": "bench_attn",
+            "justMyCode": false,
+            "env": {
+                "PYTORCH_ALLOC_CONF": "expandable_segments:True",
+            }
         },
     ]
 }

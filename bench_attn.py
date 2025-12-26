@@ -1,24 +1,39 @@
+import math
 from dataclasses import dataclass
-from os import environ
 import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
 from kernels import get_kernel
-flash_attn_interface = get_kernel('varunneal/flash-attention-3').flash_attn_interface
+from triton.testing import do_bench
+
+try:
+    if dont_bother_community_kernel := True:
+        raise ValueError("skipping community kernel load")
+    flash_attn_interface = get_kernel('varunneal/flash-attention-3').flash_attn_interface
+    get_attn_out = lambda out: out
+
+except Exception as e:
+    print(f"[WARN] failed to load kernel. Error was: <{e}>. Will try falling back to own flash_attn_interface.")
+    import flash_attn_interface
+    def get_attn_out(out):
+        assert isinstance(out, tuple)
+        out, lse = out
+        return out
 
 @dataclass
 class Hyperparameters:
+    train_bs_schedule: tuple = (8 * 2048 * 8, 16 * 2048 * 8, 24 * 2048 * 8)
     train_max_seq_len: int = 128 * 16
     val_batch_size: int = 4 * 64 * 1024 * 8
 
 args = Hyperparameters()
 
-rank = int(environ.get("RANK", 0))
-world_size = int(environ.get("WORLD_SIZE", 1))
-assert 8 % world_size == 0, "world_size must be a divisor of 8"
+rank = 0
+world_size = 8
 grad_accum_steps = 8 // world_size
-assert torch.cuda.is_available()
-device = torch.device("cuda", int(environ.get("LOCAL_RANK", 0)))
+max_seq_len=args.val_batch_size // (grad_accum_steps * world_size)
+
+device = torch.device("cuda", 0)
 torch.cuda.set_device(device)
 
 @dataclass
@@ -34,6 +49,40 @@ class AttnArgs:
 
 def norm(x: Tensor):
     return F.rms_norm(x, (x.size(-1),))
+
+class Yarn(nn.Module):
+    def __init__(self, head_dim, max_seq_len):
+        super().__init__()
+        self.head_dim = head_dim
+        self.max_seq_len = max_seq_len
+        self.reset()
+
+    def reset(self):
+        angular_freq = (1 / 1024) ** torch.linspace(0, 1, steps=self.head_dim//4, dtype=torch.float32, device=device)
+        # half-truncate RoPE by @YouJiacheng (w/ base freq tuning)
+        angular_freq = torch.cat([angular_freq, angular_freq.new_zeros(self.head_dim//4)])
+        t = torch.arange(self.max_seq_len, dtype=torch.float32, device=device)
+        theta = torch.outer(t, angular_freq)
+        self.cos = nn.Buffer(
+            theta.cos().to(torch.bfloat16), persistent=False
+        )
+        self.sin = nn.Buffer(
+            theta.sin().to(torch.bfloat16), persistent=False
+        )
+        self.angular_freq = angular_freq
+        # start with 0.1, inspired by 0.12 from @leloykun and learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
+        self.attn_scale = 0.1
+
+    def apply(self, old_window: int, new_window: int, alpha: int=1, beta: int=32):
+        rotations = args.block_size * old_window * self.angular_freq / (2 * torch.pi)
+        scaling_factor = old_window / new_window
+        interpolation_weight = torch.clamp((rotations - alpha) / (beta - alpha), 0, 1)
+        self.angular_freq *= scaling_factor + interpolation_weight * (1 - scaling_factor)
+        t = torch.arange(self.max_seq_len, dtype=torch.float32, device=self.angular_freq.device)
+        theta = torch.outer(t, self.angular_freq)
+        self.cos.copy_(theta.cos())
+        self.sin.copy_(theta.sin())
+        self.attn_scale *= 0.2 * math.log(new_window / old_window) + 1
 
 def rotary(x_BTHD: Tensor, cos: Tensor, sin: Tensor):
     assert cos.size(0) >= x_BTHD.size(-3)
@@ -119,8 +168,71 @@ class CausalSelfAttentionOrig(CausalSelfAttentionBase):
         y = flash_attn_interface.flash_attn_varlen_func(q[0], k[0], v[0], cu_seqlens_q=seqlens, cu_seqlens_k=seqlens,
                                                         max_seqlen_q=max_len, max_seqlen_k=max_len,
                                                         causal=True, softmax_scale=attn_scale, window_size=(bm_size, 0))
+        # some versions of flash_attn_varlen_func return (out, lse) instead of out
+        y = get_attn_out(y)
         y = y.view(B, T, self.num_heads, self.head_dim)
         y = y * torch.sigmoid(self.attn_gate(x[..., :self.attn_gate.weight.size(-1)])).view(B, T, self.num_heads, 1)
         y = y.contiguous().view(B, T, self.num_heads * self.head_dim) # re-assemble all head outputs side by side
         y = F.linear(y, sa_lambdas[1] * self.qkvo_w[self.dim * 3:].type_as(y))  # sa_lambdas[1] pre-multiplied to O @shenberg
         return y
+
+class CausalSelfAttentionNext(CausalSelfAttentionOrig): ...
+
+head_dim=128
+with torch.device('cuda'):
+    yarn = Yarn(head_dim, max_seq_len)
+
+hp_dtype=torch.bfloat16
+dim=768
+# seqlens=torch.tensor((0, args.train_max_seq_len), dtype=torch.int32, device=device)
+avg_seqlen=400 # median doc length is ~400
+microbsz=args.train_bs_schedule[0]//grad_accum_steps
+num_docs=128
+seqlens=torch.arange(0, avg_seqlen*num_docs, avg_seqlen, dtype=torch.int32, device=device).clamp_max_(microbsz)
+ve = torch.randn((microbsz, dim), device=device, dtype=hp_dtype, requires_grad=True)
+sa_lambdas = torch.tensor((.5, 1.), device=device, requires_grad=True)
+
+short_bm=128
+
+num_heads=6
+with torch.device('meta'):
+    orig = CausalSelfAttentionOrig(
+        dim=dim,
+        head_dim=head_dim,
+        num_heads=num_heads,
+    )
+    next = CausalSelfAttentionNext(
+        dim=dim,
+        head_dim=head_dim,
+        num_heads=num_heads,
+    )
+seed=42
+gen=torch.Generator(device)
+loss_fn = nn.MSELoss()
+
+for attn in (orig, next):
+    attn.to_empty(device=device)
+    attn.qkvo_w.data.normal_(std=attn.dim**-.5, generator=gen.manual_seed(seed))
+    attn.attn_gate.weight.data.normal_(std=attn.attn_gate.in_features**-.5, generator=gen.manual_seed(seed))
+
+input = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+1), requires_grad=True)
+target = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+2))
+
+def do_fwdbwd(mod: CausalSelfAttentionBase):
+    attn_args = AttnArgs(
+        ve=ve.clone(),
+        sa_lambdas=sa_lambdas.clone(),
+        seqlens=seqlens,
+        bm_size=short_bm,
+        cos=yarn.cos,
+        sin=yarn.sin,
+        attn_scale=yarn.attn_scale,
+        key_shift=False
+    )
+    out: Tensor = mod(input.clone(), attn_args=attn_args)
+    loss: Tensor = loss_fn(out, target)
+    loss.backward()
+
+do_fwdbwd(orig)
+do_fwdbwd(next)
+pass
