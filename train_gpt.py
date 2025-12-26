@@ -917,7 +917,11 @@ class AttnArgs:
     attn_scale: float
     key_shift: bool
 
-flash_attn_interface = get_kernel('varunneal/flash-attention-3').flash_attn_interface
+try:
+    flash_attn_interface = get_kernel('varunneal/flash-attention-3').flash_attn_interface
+except Exception as e:
+    print(f"[WARN] failed to load kernel. Error was: <{e}>. Will try falling back to own flash_attn_interface.")
+    import flash_attn_interface
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, dim: int, head_dim: int, num_heads: int):
