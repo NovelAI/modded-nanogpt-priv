@@ -12,5 +12,11 @@
                 // "TORCH_COMPILE_DISABLE": "1",
             }
         },
+        {
+            "name": "Benchmark Attention",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "bench_attn"
+        },
     ]
 }
