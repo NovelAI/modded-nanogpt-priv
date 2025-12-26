@@ -1062,7 +1062,7 @@ class GPT(nn.Module):
         self.x0_lambdas.lr_mul = 5.0
         self.x0_lambdas.wd_mul = 0.0
 
-        pad = (-num_layers * 3 - 3) % dist.get_world_size()  # updated: 3*num_layers instead of 4*
+        pad = (-num_layers * 3 - 3) % (dist.get_world_size() if dist.is_initialized() else 1)  # updated: 3*num_layers instead of 4*
         self.scalars = nn.Parameter(
             torch.cat(
                 [
@@ -1399,8 +1399,8 @@ grad_accum_steps = 8 // world_size
 assert torch.cuda.is_available()
 device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
 torch.cuda.set_device(device)
-dist.init_process_group(backend="nccl", device_id=device)
-dist.barrier()
+dist.init_process_group(backend="nccl", device_id=device) if world_size > 1 else None
+dist.barrier() if dist.is_initialized() else None
 master_process = (rank == 0) # this process will do logging, checkpointing etc.
 
 # begin logging
@@ -1443,7 +1443,7 @@ for m in model.modules():
     if isinstance(m, (nn.Embedding, nn.Linear)):
         m.weight.data = m.weight.data.bfloat16()
 for param in model.parameters():
-    dist.broadcast(param.detach(), 0)
+    dist.broadcast(param.detach(), 0) if dist.is_initialized() else None
 
 # collect the parameters to optimize
 adam_labels = ['lm_head', 'value_embed', 'smear_gate', 'x0_lambdas', 'embed']
