@@ -5,6 +5,7 @@ from torch import nn, Tensor
 import torch.nn.functional as F
 from kernels import get_kernel
 from triton.testing import do_bench
+from torch.testing import assert_close
 
 try:
     if dont_bother_community_kernel := True:
@@ -218,7 +219,7 @@ for attn in (orig, next):
 input = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+1), requires_grad=True)
 target = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+2))
 
-def do_fwdbwd(mod: CausalSelfAttentionBase):
+def do_fwd(mod: CausalSelfAttentionBase):
     attn_args = AttnArgs(
         ve=ve.clone(),
         sa_lambdas=sa_lambdas.clone(),
@@ -230,9 +231,26 @@ def do_fwdbwd(mod: CausalSelfAttentionBase):
         key_shift=False
     )
     out: Tensor = mod(input.clone(), attn_args=attn_args)
+    return out
+
+def do_lossbwd(out: Tensor):
     loss: Tensor = loss_fn(out, target)
     loss.backward()
+    return loss
 
-do_fwdbwd(orig)
-do_fwdbwd(next)
+def do_fwdbwd(mod: CausalSelfAttentionBase):
+    out: Tensor = do_fwd(mod)
+    do_lossbwd(out)
+
+if test_correctness := True:
+    out_orig = do_fwd(orig)
+    out_next = do_fwd(next)
+    assert_close(out_orig, out_next)
+
+
+    do_lossbwd(out_orig)
+    do_lossbwd(out_next)
+    assert_close(orig.qkvo_w.grad, next.qkvo_w.grad)
+    assert_close(orig.attn_gate.weight.grad, next.attn_gate.weight.grad)
+
 pass
