@@ -229,6 +229,9 @@ for attn in (orig, next):
     attn.qkvo_w.data.normal_(std=attn.dim**-.5, generator=gen.manual_seed(seed))
     attn.attn_gate.weight.data.normal_(std=attn.attn_gate.in_features**-.5, generator=gen.manual_seed(seed))
 
+orig.forward = torch.compile(orig.forward, dynamic=False, fullgraph=True)
+# orig.forward = torch.compile(orig.forward)
+
 input = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+1), requires_grad=True)
 target = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+2))
 
