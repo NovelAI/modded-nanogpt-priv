@@ -21,6 +21,9 @@ except Exception as e:
         out, lse = out
         return out
 
+def next_multiple_of_n(v: float | int, *, n: int):
+    return next(x for x in range(n, int(v) + 1 + n, n) if x >= v)
+
 @dataclass
 class Hyperparameters:
     train_bs_schedule: tuple = (8 * 2048 * 8, 16 * 2048 * 8, 24 * 2048 * 8)
@@ -194,9 +197,11 @@ hp_dtype=torch.bfloat16
 dim=768
 # seqlens=torch.tensor((0, args.train_max_seq_len), dtype=torch.int32, device=device)
 avg_seqlen=400 # median doc length is ~400
-microbsz=args.train_bs_schedule[0]//grad_accum_steps
-num_docs=128
-seqlens=torch.arange(0, avg_seqlen*num_docs, avg_seqlen, dtype=torch.int32, device=device).clamp_max_(microbsz)
+minibsz=args.train_bs_schedule[0]
+pergpu_minibsz=minibsz//grad_accum_steps
+microbsz = pergpu_minibsz // world_size
+max_num_docs = next_multiple_of_n(microbsz // 300, n=128)
+seqlens=torch.arange(0, avg_seqlen*max_num_docs, avg_seqlen, dtype=torch.int32, device=device).clamp_max_(microbsz)
 ve = torch.randn((microbsz, dim), device=device, dtype=hp_dtype, requires_grad=True)
 sa_lambdas = torch.tensor((.5, 1.), device=device, requires_grad=True)
 
@@ -235,6 +240,7 @@ def do_fwd(mod: CausalSelfAttentionBase):
         cos=yarn.cos,
         sin=yarn.sin,
         attn_scale=yarn.attn_scale,
+        # attn_scale=head_dim**-.5,
         key_shift=False
     )
     out: Tensor = mod(input.clone(), attn_args=attn_args)
@@ -258,6 +264,9 @@ if test_correctness := True:
     do_lossbwd(out_orig)
     do_lossbwd(out_next)
     assert_close(orig.qkvo_w.grad, next.qkvo_w.grad)
+    # K and V grads don't match
+    # assert_close(orig.qkvo_w.grad.split(768)[1], next.qkvo_w.grad.split(768)[1])
+    # assert_close(orig.qkvo_w.grad.split(768)[2], next.qkvo_w.grad.split(768)[2])
     assert_close(orig.attn_gate.weight.grad, next.attn_gate.weight.grad)
 
 pass
