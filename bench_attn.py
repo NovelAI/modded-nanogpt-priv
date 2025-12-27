@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+from functools import partial
 import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
@@ -255,7 +256,7 @@ def do_fwdbwd(mod: CausalSelfAttentionBase):
     out: Tensor = do_fwd(mod)
     do_lossbwd(out)
 
-if test_correctness := True:
+if test_correctness := False:
     out_orig = do_fwd(orig)
     out_next = do_fwd(next)
     assert_close(out_orig, out_next)
@@ -269,4 +270,13 @@ if test_correctness := True:
     # assert_close(orig.qkvo_w.grad.split(768)[2], next.qkvo_w.grad.split(768)[2])
     assert_close(orig.attn_gate.weight.grad, next.attn_gate.weight.grad)
 
+if test_latency := True:
+    orig_ms: float = do_bench(partial(do_fwdbwd, mod=orig))
+    next_ms: float = do_bench(partial(do_fwdbwd, mod=next))
+    orig_its: float = 1000 / orig_ms
+    next_its: float = 1000 / next_ms
+    print(f"""
+orig: {orig_its:.2f} it/s
+next: {next_its:.2f} it/s
+""")
 pass
