@@ -1,26 +1,88 @@
+from typing import Callable, Optional
 import math
+from pathlib import Path
 from dataclasses import dataclass
 from functools import partial
 import torch
-from torch import nn, Tensor
+from torch import nn, Tensor, FloatTensor, IntTensor
 import torch.nn.functional as F
-from kernels import get_kernel
+from kernels import get_kernel, get_local_kernel
 from triton.testing import do_bench
 from torch.testing import assert_close
 
-try:
-    if dont_bother_community_kernel := True:
-        raise ValueError("skipping community kernel load")
-    flash_attn_interface = get_kernel('varunneal/flash-attention-3').flash_attn_interface
-    get_attn_out = lambda out: out
-
-except Exception as e:
-    print(f"[WARN] failed to load kernel. Error was: <{e}>. Will try falling back to own flash_attn_interface.")
-    import flash_attn_interface
-    def get_attn_out(out):
-        assert isinstance(out, tuple)
-        out, lse = out
+if use_fa3 := True:
+    get_attn_out: Callable[[Tensor|tuple[Tensor, ...]], Tensor]
+    if use_local_fa3_kernel := True:
+        flash_attn_interface = get_local_kernel(repo_path=Path('hf-kernels/flash-attention-3'), package_name='flash_attention_3').flash_attn_interface
+        get_attn_out = lambda out: out
+    elif use_community_fa3_kernel := False:
+        flash_attn_interface = get_kernel('varunneal/flash-attention-3').flash_attn_interface
+        get_attn_out = lambda out: out
+    elif use_dist_fa3 := False:
+        import flash_attn_interface
+        def get_attn_out(out):
+            assert isinstance(out, tuple)
+            out, lse = out
+            return out
+    else:
+        raise ValueError("well you have to pick one")
+    def varlen_attn(
+        q: FloatTensor,
+        k: FloatTensor,
+        v: FloatTensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        cum_seq_q: Optional[IntTensor] = None,
+        cum_seq_k: Optional[IntTensor] = None,
+        causal=False,
+        scale: Optional[float] = None,
+        window_size_left: Optional[int] = None,
+        window_size_right: Optional[int] = None,
+    ) -> FloatTensor:
+        assert (window_size_left is None) == (window_size_right is None)
+        window_size = None if window_size_left is None else (window_size_left, window_size_right)
+        out = flash_attn_interface.flash_attn_varlen_func(
+            q, k, v,
+            cu_seqlens_q=cum_seq_q,
+            cu_seqlens_k=cum_seq_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            causal=causal,
+            softmax_scale=scale,
+            window_size=window_size,
+        )
+        return get_attn_out(out)
+else:
+    print("[WARN] falling back to torch builtin private varlen attn API, which is probably FA2")
+    def varlen_attn(
+        q: FloatTensor,
+        k: FloatTensor,
+        v: FloatTensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        cum_seq_q: Optional[IntTensor] = None,
+        cum_seq_k: Optional[IntTensor] = None,
+        causal=False,
+        scale: Optional[float] = None,
+        window_size_left: Optional[int] = None,
+        window_size_right: Optional[int] = None,
+    ) -> FloatTensor:
+        out, _, _, _, _ = torch.ops.aten._flash_attention_forward(
+            q, k, v,
+            cum_seq_q=cum_seq_q,
+            cum_seq_k=cum_seq_k,
+            max_q=max_seqlen_q,
+            max_k=max_seqlen_k,
+            dropout_p=0.0,
+            is_causal=causal,
+            return_debug_mask=False,
+            scale=scale,
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
+        )
         return out
+
+
 
 def next_multiple_of_n(v: float | int, *, n: int):
     return next(x for x in range(n, int(v) + 1 + n, n) if x >= v)
@@ -170,18 +232,19 @@ class CausalSelfAttentionOrig(CausalSelfAttentionBase):
         max_len = args.train_max_seq_len if self.training else (args.val_batch_size // (grad_accum_steps * world_size))
 
         # use flash_attn over flex_attn @varunneal. flash_attn_varlen suggested by @YouJiacheng
-        if use_builtin := False:
-            y = torch.ops.aten._flash_attention_forward(q[0], k[0], v[0], cum_seq_q=seqlens, cum_seq_k=seqlens,
-                                                            max_q=max_len, max_k=max_len, dropout_p=0.0,
-                                                            is_causal=True, return_debug_mask=False, scale=attn_scale, window_size_left=bm_size, window_size_right=0)
-            y, _, _, _, _ = y
-        else:
-            y = flash_attn_interface.flash_attn_varlen_func(q[0], k[0], v[0], cu_seqlens_q=seqlens, cu_seqlens_k=seqlens,
-                                                            max_seqlen_q=max_len, max_seqlen_k=max_len,
-                                                            causal=True, softmax_scale=attn_scale, window_size=(bm_size, 0))
-            # some versions of flash_attn_varlen_func return (out, lse) instead of out
-            y = get_attn_out(y)
-        # y = q
+        y: Tensor = varlen_attn(
+            q[0],
+            k[0],
+            v[0],
+            max_seqlen_q=max_len,
+            max_seqlen_k=max_len,
+            cum_seq_q=seqlens,
+            cum_seq_k=seqlens,
+            causal=True,
+            scale=attn_scale,
+            window_size_left=bm_size,
+            window_size_right=0,
+        )
         y = y.view(B, T, self.num_heads, self.head_dim)
         y = y * torch.sigmoid(self.attn_gate(x[..., :self.attn_gate.weight.size(-1)])).view(B, T, self.num_heads, 1)
         y = y.contiguous().view(B, T, self.num_heads * self.head_dim) # re-assemble all head outputs side by side
@@ -230,7 +293,6 @@ for attn in (orig, next):
     attn.attn_gate.weight.data.normal_(std=attn.attn_gate.in_features**-.5, generator=gen.manual_seed(seed))
 
 orig.forward = torch.compile(orig.forward, dynamic=False, fullgraph=True)
-# orig.forward = torch.compile(orig.forward)
 
 input = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+1), requires_grad=True)
 target = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+2))
@@ -259,7 +321,7 @@ def do_fwdbwd(mod: CausalSelfAttentionBase):
     out: Tensor = do_fwd(mod)
     do_lossbwd(out)
 
-if test_correctness := False:
+if test_correctness := True:
     out_orig = do_fwd(orig)
     out_next = do_fwd(next)
     assert_close(out_orig, out_next)
@@ -268,9 +330,6 @@ if test_correctness := False:
     do_lossbwd(out_orig)
     do_lossbwd(out_next)
     assert_close(orig.qkvo_w.grad, next.qkvo_w.grad)
-    # K and V grads don't match
-    # assert_close(orig.qkvo_w.grad.split(768)[1], next.qkvo_w.grad.split(768)[1])
-    # assert_close(orig.qkvo_w.grad.split(768)[2], next.qkvo_w.grad.split(768)[2])
     assert_close(orig.attn_gate.weight.grad, next.attn_gate.weight.grad)
 
 if test_latency := True:
