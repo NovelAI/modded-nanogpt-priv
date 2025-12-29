@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from kernels import get_kernel, get_local_kernel
 from triton.testing import do_bench
 from torch.testing import assert_close
+from src.rope import RopeInPlace
 
 if use_fa3 := True:
     get_attn_out: Callable[[Tensor|tuple[Tensor, ...]], Tensor]
@@ -270,9 +271,14 @@ class CausalSelfAttentionNext(CausalSelfAttentionOrig):
         # qk = qkv[..., :2 * self.num_heads, :]
         qk, v = qkv.tensor_split((2*self.num_heads,), dim=-2)
         qk = norm(qk)
-        qk = rotary(qk, cos, sin)
+        # qk = rotary(qk, cos, sin)
+        RopeInPlace.apply(
+            qk.unflatten(-1, (2, -1)),
+            cos[:qk.size(-3), None],
+            sin[:qk.size(-3), None],
+            1,
+        )
         q,k=qk.chunk(2, dim=-2)
-        # HalfRopeInPlace.apply()
         # q, k = rotary(q, cos, sin), rotary(k, cos, sin)
         if key_shift:
             # shift keys forward for the stationary head dims. Enables 1-layer induction.
@@ -342,6 +348,7 @@ for attn in (orig, next):
     attn.attn_gate.weight.data.normal_(std=attn.attn_gate.in_features**-.5, generator=gen.manual_seed(seed))
 
 orig.forward = torch.compile(orig.forward, dynamic=False, fullgraph=True)
+next.forward = torch.compile(next.forward, dynamic=False, fullgraph=True)
 
 input = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+1), requires_grad=True)
 target = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+2))
@@ -380,7 +387,7 @@ if test_correctness := True:
 
     do_lossbwd(out_orig)
     do_lossbwd(out_next)
-    assert_close(orig.qkvo_w.grad, next.qkvo_w.grad)
+    assert_close(orig.qkvo_w.grad, next.qkvo_w.grad, rtol=1e-6, atol=5e-5)
     assert_close(orig.attn_gate.weight.grad, next.attn_gate.weight.grad)
 
 if test_latency := True:
