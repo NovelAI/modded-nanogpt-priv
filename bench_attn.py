@@ -114,6 +114,8 @@ class AttnArgs:
     attn_scale: float
     key_shift: bool
 
+hp_dtype=torch.bfloat16
+# eps: float = torch.finfo(torch.bfloat16).eps # rms_norm defaults to x.dtype, though it upcasts x to at least f32 before checking its dtype
 def norm(x: Tensor):
     return F.rms_norm(x, (x.size(-1),))
 
@@ -131,10 +133,10 @@ class Yarn(nn.Module):
         t = torch.arange(self.max_seq_len, dtype=torch.float32, device=device)
         theta = torch.outer(t, angular_freq)
         self.cos = nn.Buffer(
-            theta.cos().to(torch.bfloat16), persistent=False
+            theta.cos().to(hp_dtype), persistent=False
         )
         self.sin = nn.Buffer(
-            theta.sin().to(torch.bfloat16), persistent=False
+            theta.sin().to(hp_dtype), persistent=False
         )
         self.angular_freq = angular_freq
         # start with 0.1, inspired by 0.12 from @leloykun and learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
@@ -257,7 +259,6 @@ head_dim=128
 with torch.device('cuda'):
     yarn = Yarn(head_dim, max_seq_len)
 
-hp_dtype=torch.bfloat16
 dim=768
 # seqlens=torch.tensor((0, args.train_max_seq_len), dtype=torch.int32, device=device)
 avg_seqlen=400 # median doc length is ~400
