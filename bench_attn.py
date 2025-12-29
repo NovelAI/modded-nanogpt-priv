@@ -325,6 +325,8 @@ def do_fwdbwd(mod: CausalSelfAttentionBase):
 if test_correctness := True:
     out_orig = do_fwd(orig)
     out_next = do_fwd(next)
+    # rtol=1e-2 due to torch.finfo(torch.bfloat16).resolution
+    assert_close(out_orig, out_next, rtol=1e-2, atol=1e-2)
     assert_close(out_orig, out_next)
 
 
