@@ -253,7 +253,55 @@ class CausalSelfAttentionOrig(CausalSelfAttentionBase):
         y = F.linear(y, sa_lambdas[1] * self.qkvo_w[self.dim * 3:].type_as(y))  # sa_lambdas[1] pre-multiplied to O @shenberg
         return y
 
-class CausalSelfAttentionNext(CausalSelfAttentionOrig): ...
+class CausalSelfAttentionNext(CausalSelfAttentionOrig):
+    def forward(self, x: Tensor, attn_args: AttnArgs):
+        B, T = x.size(0), x.size(1) # batch size, sequence length
+        assert B == 1, "varlen sequences requires B == 1"
+        assert T % 16 == 0
+        # unpack attention args
+        cos, sin = attn_args.cos, attn_args.sin
+        ve, sa_lambdas, key_shift = attn_args.ve, attn_args.sa_lambdas, attn_args.key_shift
+        seqlens, attn_scale, bm_size = attn_args.seqlens, attn_args.attn_scale, attn_args.bm_size
+
+        # q, k, v = F.linear(x, sa_lambdas[0] * self.qkvo_w[:self.dim * 3].type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim).chunk(3, dim=-2)
+        qkv = F.linear(x, sa_lambdas[0] * self.qkvo_w[:self.dim * 3].type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim)
+        # q, k, v = qkv.chunk(3, dim=-2)
+        # q, k = norm(q), norm(k) # QK norm @Grad62304977
+        # qk = qkv[..., :2 * self.num_heads, :]
+        qk, v = qkv.tensor_split((2*self.num_heads,), dim=-2)
+        qk = norm(qk)
+        qk = rotary(qk, cos, sin)
+        q,k=qk.chunk(2, dim=-2)
+        # HalfRopeInPlace.apply()
+        # q, k = rotary(q, cos, sin), rotary(k, cos, sin)
+        if key_shift:
+            # shift keys forward for the stationary head dims. Enables 1-layer induction.
+            k[:, 1:, :, self.head_dim//4:self.head_dim//2] = k[:, :-1, :, self.head_dim//4:self.head_dim//2]
+            k[:, 1:, :, self.head_dim//4+self.head_dim//2:] = k[:, :-1, :, self.head_dim//4+self.head_dim//2:]
+        if ve is not None:
+            v = v + ve.view_as(v) # @ KoszarskyB & @Grad62304977
+
+        max_len = args.train_max_seq_len if self.training else (args.val_batch_size // (grad_accum_steps * world_size))
+
+        # use flash_attn over flex_attn @varunneal. flash_attn_varlen suggested by @YouJiacheng
+        y: Tensor = varlen_attn(
+            q[0],
+            k[0],
+            v[0],
+            max_seqlen_q=max_len,
+            max_seqlen_k=max_len,
+            cum_seq_q=seqlens,
+            cum_seq_k=seqlens,
+            causal=True,
+            scale=attn_scale,
+            window_size_left=bm_size,
+            window_size_right=0,
+        )
+        y = y.view(B, T, self.num_heads, self.head_dim)
+        y = y * torch.sigmoid(self.attn_gate(x[..., :self.attn_gate.weight.size(-1)])).view(B, T, self.num_heads, 1)
+        y = y.contiguous().view(B, T, self.num_heads * self.head_dim) # re-assemble all head outputs side by side
+        y = F.linear(y, sa_lambdas[1] * self.qkvo_w[self.dim * 3:].type_as(y))  # sa_lambdas[1] pre-multiplied to O @shenberg
+        return y
 
 head_dim=128
 with torch.device('cuda'):
