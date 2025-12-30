@@ -402,6 +402,7 @@ if do_profile := True:
         # with_stack=True,
     )
     for mod, label in zip((orig, next), ("orig", "next"), strict=True):
+        do_fwdbwd(orig)
         with prof:
             do_fwdbwd(orig)
         trace_dir = Path("out_trace")
