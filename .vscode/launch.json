@@ -24,6 +24,7 @@
             "type": "debugpy",
             "request": "launch",
             "module": "bench_attn",
+            "subProcess": false,
             "justMyCode": false,
             "env": {
                 "PYTORCH_ALLOC_CONF": "expandable_segments:True",
