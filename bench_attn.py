@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from kernels import get_kernel, get_local_kernel
 from triton.testing import do_bench
 from torch.testing import assert_close
+from torch.profiler import ProfilerActivity, profile
 from src.rope import RopeInPlace
 
 if use_fa3 := True:
@@ -377,7 +378,7 @@ def do_fwdbwd(mod: CausalSelfAttentionBase):
     out: Tensor = do_fwd(mod)
     do_lossbwd(out)
 
-if test_correctness := True:
+if test_correctness := False:
     out_orig = do_fwd(orig)
     out_next = do_fwd(next)
     # rtol=1e-2 due to torch.finfo(torch.bfloat16).resolution
@@ -390,9 +391,28 @@ if test_correctness := True:
     assert_close(orig.qkvo_w.grad, next.qkvo_w.grad, rtol=1e-6, atol=5e-5)
     assert_close(orig.attn_gate.weight.grad, next.attn_gate.weight.grad)
 
-if test_latency := True:
-    orig_ms: float = do_bench(partial(do_fwdbwd, mod=orig))
-    next_ms: float = do_bench(partial(do_fwdbwd, mod=next))
+if do_profile := True:
+    prof = profile(
+        activities=[
+            ProfilerActivity.CPU,
+            ProfilerActivity.CUDA,
+        ],
+        record_shapes=False,
+        # stack traces introduce sufficient CPU overhead as to mislead, so don't believe such profiles entirely.
+        # with_stack=True,
+    )
+    for mod, label in zip((orig, next), ("orig", "next"), strict=True):
+        with prof:
+            do_fwdbwd(orig)
+        trace_dir = Path("out_trace")
+        trace_dir.mkdir(exist_ok=True)
+        profile_path = trace_dir / f"{label}.json"
+        print(f"Saving profile to {profile_path}")
+        prof.export_chrome_trace(str(profile_path))
+
+if test_latency := False:
+    orig_ms: float = do_bench(partial(do_fwdbwd, mod=orig), rep=9000, warmup=1000)
+    next_ms: float = do_bench(partial(do_fwdbwd, mod=next), rep=9000, warmup=1000)
     orig_its: float = 1000 / orig_ms
     next_its: float = 1000 / next_ms
     print(f"""
