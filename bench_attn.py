@@ -497,8 +497,8 @@ def clear_input_grads():
     for t in inputs_to_none:
         t.grad = None
 
-if do_profile := False:
-    wait, warmup, active = 1, 3, 1
+if do_profile := True:
+    wait, warmup, active = 1, 1, 1
     prof_its = wait + warmup + active
     prof = profile(
         activities=[
@@ -538,7 +538,7 @@ if test_fwdbwd := False:
     with_cudagraph_do_fwdbwd(cg)
     torch.cuda.synchronize()
 
-if test_latency := True:
+if test_latency := False:
     warmup, rep = 1000, 2000
     orig_ms: float = do_bench(partial(do_fwdbwd, mod=orig), rep=rep, warmup=warmup, grad_to_none=inputs_to_none)
     cg_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=cg), rep=rep, warmup=warmup, grad_to_none=[*cg_grads_to_none, *inputs_to_none])
