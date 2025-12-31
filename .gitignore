@@ -5,3 +5,4 @@ logs/
 .DS_Store
 /hf-kernels
 /out*/
+/collect_env.py
