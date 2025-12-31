@@ -424,19 +424,19 @@ cg.o.weight.data.copy_(o)
 cg_grads_to_none = [cg.qkv.weight, cg.o.weight, cg.attn_gate.weight]
 next_grads_to_none = [next.qkvo_w, next.attn_gate.weight]
 
-cg_opts = {
-    "backend": "inductor",
-    "options": {
-        "triton.cudagraphs": True
-    }
-}
+# cg_opts = {
+#     "backend": "inductor",
+#     "options": {
+#         "triton.cudagraphs": True
+#     }
+# }
 
-# orig = torch.compile(orig, dynamic=False, fullgraph=True)
+orig = torch.compile(orig, dynamic=False, fullgraph=True)
 
-import torch._inductor.config as triton_config
-triton_config.triton.cudagraphs = True
-cg = torch.compile(cg, dynamic=False, fullgraph=True, **cg_opts)
-# next = torch.compile(next, dynamic=False, fullgraph=True, mode='reduce-overhead')
+# import torch._inductor.config as triton_config
+# triton_config.triton.cudagraphs = True
+cg = torch.compile(cg, dynamic=False, fullgraph=True, mode='reduce-overhead')
+next = torch.compile(next, dynamic=False, fullgraph=True, mode='reduce-overhead')
 
 ve = torch.randn((microbsz, dim), device=device, dtype=hp_dtype, requires_grad=True)
 sa_lambdas = torch.tensor((.5, 1.), device=device, requires_grad=True)
@@ -512,6 +512,8 @@ if do_profile := True:
         mod.zero_grad()
         do_fwdbwd_ = with_cudagraph_do_fwdbwd if wants_cudagraph else do_fwdbwd
         do_fwdbwd_(mod)
+        clear_input_grads()
+        mod.zero_grad()
         with prof:
             do_fwdbwd_(mod)
         trace_dir = Path("out_trace_nanogpt")
