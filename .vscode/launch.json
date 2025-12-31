@@ -31,6 +31,28 @@
             }
         },
         {
+            "name": "Benchmark Share",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "bench_share",
+            "subProcess": false,
+            "justMyCode": false,
+            "env": {
+                "PYTORCH_ALLOC_CONF": "expandable_segments:True",
+            }
+        },
+        {
+            "name": "Benchmark Share 2",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "bench_share",
+            "subProcess": false,
+            "justMyCode": false,
+            "env": {
+                "PYTORCH_ALLOC_CONF": "expandable_segments:True",
+            }
+        },
+        {
             "name": "Repro",
             "type": "debugpy",
             "request": "launch",
