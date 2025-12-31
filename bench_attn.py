@@ -404,7 +404,6 @@ with torch.device('meta'):
         head_dim=head_dim,
         num_heads=num_heads,
     )
-cg_grads_to_none = [cg.qkv.weight, cg.o.weight, cg.attn_gate.weight]
 seed=42
 gen=torch.Generator(device)
 loss_fn = nn.MSELoss()
@@ -418,6 +417,8 @@ for attn in (orig, next, cg):
 qkv, o = orig.qkvo_w.tensor_split((orig.dim*3,), dim=-2)
 cg.qkv.weight.data.copy_(qkv)
 cg.o.weight.data.copy_(o)
+
+cg_grads_to_none = [cg.qkv.weight, cg.o.weight, cg.attn_gate.weight]
 
 orig = torch.compile(orig, dynamic=False, fullgraph=True)
 cg = torch.compile(cg, dynamic=False, fullgraph=True, mode='reduce-overhead')
