@@ -7,10 +7,11 @@ import torch
 from torch import nn, Tensor, FloatTensor, IntTensor
 import torch.nn.functional as F
 from kernels import get_kernel, get_local_kernel
-from triton.testing import do_bench
+# from triton.testing import do_bench
 from torch.testing import assert_close
 from torch.profiler import ProfilerActivity, profile
 from src.rope import RopeInPlace
+from src.do_bench import do_bench
 # import torch._inductor.config
 # torch._inductor.config.triton.cudagraph_trees = False
 
@@ -499,6 +500,7 @@ if test_fwdbwd := False:
     cg.zero_grad()
     with_cudagraph_do_fwdbwd(cg)
     torch.cuda.synchronize()
+    cg.zero_grad()
 
 if test_latency := True:
     warmup, rep = 25, 100
