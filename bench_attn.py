@@ -15,6 +15,9 @@ from src.do_bench import do_bench
 # import torch._inductor.config
 # torch._inductor.config.triton.cudagraph_trees = False
 
+import torch._dynamo
+torch._dynamo.config.verbose = True
+
 if use_fa3 := True:
     get_attn_out: Callable[[Tensor|tuple[Tensor, ...]], Tensor]
     if use_local_fa3_kernel := True:
@@ -332,13 +335,13 @@ class CausalSelfAttentionNext(CausalSelfAttentionOrig):
         # qk = qkv[..., :2 * self.num_heads, :]
         qk, v = qkv.tensor_split((2*self.num_heads,), dim=-2)
         qk = norm(qk)
-        qk = rotary(qk, cos, sin)
-        # RopeInPlace.apply(
-        #     qk.unflatten(-1, (2, -1)),
-        #     cos[:qk.size(-3), None],
-        #     sin[:qk.size(-3), None],
-        #     1,
-        # )
+        # qk = rotary(qk, cos, sin)
+        RopeInPlace.apply(
+            qk.unflatten(-1, (2, -1)),
+            cos[:qk.size(-3), None],
+            sin[:qk.size(-3), None],
+            1,
+        )
         q,k=qk.chunk(2, dim=-2)
         # q, k = rotary(q, cos, sin), rotary(k, cos, sin)
         if key_shift:
@@ -419,7 +422,17 @@ cg.o.weight.data.copy_(o)
 cg_grads_to_none = [cg.qkv.weight, cg.o.weight, cg.attn_gate.weight]
 next_grads_to_none = [next.qkvo_w, next.attn_gate.weight]
 
-orig = torch.compile(orig, dynamic=False, fullgraph=True)
+# cg_opts = {
+#     "backend": "inductor",
+#     "options": {
+#         "triton.cudagraphs": True
+#     }
+# }
+
+# orig = torch.compile(orig, dynamic=False, fullgraph=True)
+
+# import torch._inductor.config as triton_config
+# triton_config.triton.cudagraphs = True
 cg = torch.compile(cg, dynamic=False, fullgraph=True, mode='reduce-overhead')
 next = torch.compile(next, dynamic=False, fullgraph=True, mode='reduce-overhead')
 
@@ -477,6 +490,11 @@ if test_correctness := False:
     assert_close(orig.qkvo_w.grad, next.qkvo_w.grad, rtol=1e-6, atol=5e-5)
     assert_close(orig.attn_gate.weight.grad, next.attn_gate.weight.grad)
 
+inputs_to_none = [input, ve, sa_lambdas]
+def clear_input_grads():
+    for t in inputs_to_none:
+        t.grad = None
+
 if do_profile := False:
     prof = profile(
         activities=[
@@ -488,6 +506,8 @@ if do_profile := False:
         # with_stack=True,
     )
     for mod, label, wants_cudagraph in zip((orig, next, cg), ("orig", "next", "cg"), (False, True, True), strict=True):
+        clear_input_grads()
+        mod.zero_grad()
         do_fwdbwd_ = with_cudagraph_do_fwdbwd if wants_cudagraph else do_fwdbwd
         do_fwdbwd_(orig)
         with prof:
@@ -499,15 +519,18 @@ if do_profile := False:
         prof.export_chrome_trace(str(profile_path))
 
 if test_fwdbwd := False:
-    with_cudagraph_do_fwdbwd(cg)
-    torch.cuda.synchronize()
+    clear_input_grads()
     cg.zero_grad()
     with_cudagraph_do_fwdbwd(cg)
     torch.cuda.synchronize()
+    # import torch._inductor.config as config
+    # print(config.triton.cudagraphs)  # Should be True
+    clear_input_grads()
     cg.zero_grad()
+    with_cudagraph_do_fwdbwd(cg)
+    torch.cuda.synchronize()
 
 if test_latency := True:
-    inputs_to_none = [input, ve, sa_lambdas]
     warmup, rep = 25, 100
     orig_ms: float = do_bench(partial(do_fwdbwd, mod=orig), rep=rep, warmup=warmup, grad_to_none=inputs_to_none)
     cg_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=cg), rep=rep, warmup=warmup, grad_to_none=[*cg_grads_to_none, *inputs_to_none])
