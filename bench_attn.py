@@ -12,9 +12,9 @@ from torch.testing import assert_close
 from torch.profiler import ProfilerActivity, profile
 from src.rope import RopeInPlace
 from src.do_bench import do_bench
-import torch._inductor.config
+# import torch._inductor.config
 # torch._inductor.config.triton.cudagraph_trees = False
-torch._inductor.config.triton.cudagraphs = True
+# torch._inductor.config.triton.cudagraphs = True
 
 import torch._dynamo
 # import logging
@@ -497,7 +497,7 @@ def clear_input_grads():
     for t in inputs_to_none:
         t.grad = None
 
-if do_profile := True:
+if do_profile := False:
     prof = profile(
         activities=[
             ProfilerActivity.CPU,
@@ -534,7 +534,7 @@ if test_fwdbwd := False:
     with_cudagraph_do_fwdbwd(cg)
     torch.cuda.synchronize()
 
-if test_latency := False:
+if test_latency := True:
     warmup, rep = 25, 100
     orig_ms: float = do_bench(partial(do_fwdbwd, mod=orig), rep=rep, warmup=warmup, grad_to_none=inputs_to_none)
     cg_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=cg), rep=rep, warmup=warmup, grad_to_none=[*cg_grads_to_none, *inputs_to_none])
