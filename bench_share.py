@@ -8,7 +8,6 @@ from functools import partial
 import torch
 from torch import nn, Tensor, FloatTensor, IntTensor
 import torch.nn.functional as F
-from kernels import get_kernel, get_local_kernel
 from torch.testing import assert_close
 from torch.profiler import ProfilerActivity, profile
 
@@ -99,9 +98,11 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
 if use_fa3 := False:
     get_attn_out: Callable[[Tensor|tuple[Tensor, ...]], Tensor]
     if use_local_fa3_kernel := True:
+        from kernels import get_local_kernel
         flash_attn_interface = get_local_kernel(repo_path=Path('hf-kernels/flash-attention-3'), package_name='flash_attention_3').flash_attn_interface
         get_attn_out = lambda out: out
     elif use_community_fa3_kernel := False:
+        from kernels import get_kernel
         flash_attn_interface = get_kernel('varunneal/flash-attention-3').flash_attn_interface
         get_attn_out = lambda out: out
     elif use_dist_fa3 := False:

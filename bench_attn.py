@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 import math
 from pathlib import Path
 from dataclasses import dataclass
@@ -6,7 +6,6 @@ from functools import partial
 import torch
 from torch import nn, Tensor, FloatTensor, IntTensor
 import torch.nn.functional as F
-from kernels import get_kernel, get_local_kernel
 # from triton.testing import do_bench
 from torch.testing import assert_close
 from torch.profiler import ProfilerActivity, profile
@@ -23,9 +22,11 @@ torch._dynamo.config.verbose = True
 if use_fa3 := True:
     get_attn_out: Callable[[Tensor|tuple[Tensor, ...]], Tensor]
     if use_local_fa3_kernel := True:
+        from kernels import get_local_kernel
         flash_attn_interface = get_local_kernel(repo_path=Path('hf-kernels/flash-attention-3'), package_name='flash_attention_3').flash_attn_interface
         get_attn_out = lambda out: out
     elif use_community_fa3_kernel := False:
+        from kernels import get_kernel
         flash_attn_interface = get_kernel('varunneal/flash-attention-3').flash_attn_interface
         get_attn_out = lambda out: out
     elif use_dist_fa3 := False:
