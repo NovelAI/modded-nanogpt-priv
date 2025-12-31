@@ -487,10 +487,11 @@ if do_profile := False:
         # stack traces introduce sufficient CPU overhead as to mislead, so don't believe such profiles entirely.
         # with_stack=True,
     )
-    for mod, label in zip((orig, next), ("orig", "next"), strict=True):
-        do_fwdbwd(orig)
+    for mod, label, wants_cudagraph in zip((orig, next, cg), ("orig", "next", "cg"), (False, True, True), strict=True):
+        do_fwdbwd_ = with_cudagraph_do_fwdbwd if wants_cudagraph else do_fwdbwd
+        do_fwdbwd_(orig)
         with prof:
-            do_fwdbwd(orig)
+            do_fwdbwd_(orig)
         trace_dir = Path("out_trace_nanogpt")
         trace_dir.mkdir(exist_ok=True)
         profile_path = trace_dir / f"{label}.json"
@@ -509,12 +510,14 @@ if test_latency := True:
     inputs_to_none = [input, ve, sa_lambdas]
     warmup, rep = 25, 100
     orig_ms: float = do_bench(partial(do_fwdbwd, mod=orig), rep=rep, warmup=warmup, grad_to_none=inputs_to_none)
+    cg_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=cg), rep=rep, warmup=warmup, grad_to_none=[*cg_grads_to_none, *inputs_to_none])
     next_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=next), rep=rep, warmup=warmup, grad_to_none=[*next_grads_to_none, *inputs_to_none])
-    # next_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=cg), rep=rep, warmup=warmup, grad_to_none=[*cg_grads_to_none, *inputs_to_none])
     orig_its: float = 1000 / orig_ms
+    cg_its: float = 1000 / cg_ms
     next_its: float = 1000 / next_ms
     print(f"""
 orig: {orig_its:.2f} it/s
+  cg: {cg_its:.2f} it/s
 next: {next_its:.2f} it/s
 """)
 pass
