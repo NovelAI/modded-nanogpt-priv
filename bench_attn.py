@@ -404,6 +404,7 @@ with torch.device('meta'):
         head_dim=head_dim,
         num_heads=num_heads,
     )
+cg_grads_to_none = [cg.qkv.weight, cg.o.weight, cg.attn_gate.weight]
 seed=42
 gen=torch.Generator(device)
 loss_fn = nn.MSELoss()
