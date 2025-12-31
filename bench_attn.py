@@ -12,10 +12,12 @@ from torch.testing import assert_close
 from torch.profiler import ProfilerActivity, profile
 from src.rope import RopeInPlace
 from src.do_bench import do_bench
-# import torch._inductor.config
+import torch._inductor.config
 # torch._inductor.config.triton.cudagraph_trees = False
+torch._inductor.config.triton.cudagraphs = True
 
 import torch._dynamo
+# import logging
 torch._dynamo.config.verbose = True
 
 if use_fa3 := True:
@@ -422,19 +424,19 @@ cg.o.weight.data.copy_(o)
 cg_grads_to_none = [cg.qkv.weight, cg.o.weight, cg.attn_gate.weight]
 next_grads_to_none = [next.qkvo_w, next.attn_gate.weight]
 
-# cg_opts = {
-#     "backend": "inductor",
-#     "options": {
-#         "triton.cudagraphs": True
-#     }
-# }
+cg_opts = {
+    "backend": "inductor",
+    "options": {
+        "triton.cudagraphs": True
+    }
+}
 
 # orig = torch.compile(orig, dynamic=False, fullgraph=True)
 
-# import torch._inductor.config as triton_config
-# triton_config.triton.cudagraphs = True
-cg = torch.compile(cg, dynamic=False, fullgraph=True, mode='reduce-overhead')
-next = torch.compile(next, dynamic=False, fullgraph=True, mode='reduce-overhead')
+import torch._inductor.config as triton_config
+triton_config.triton.cudagraphs = True
+cg = torch.compile(cg, dynamic=False, fullgraph=True, **cg_opts)
+# next = torch.compile(next, dynamic=False, fullgraph=True, mode='reduce-overhead')
 
 ve = torch.randn((microbsz, dim), device=device, dtype=hp_dtype, requires_grad=True)
 sa_lambdas = torch.tensor((.5, 1.), device=device, requires_grad=True)
@@ -495,7 +497,7 @@ def clear_input_grads():
     for t in inputs_to_none:
         t.grad = None
 
-if do_profile := False:
+if do_profile := True:
     prof = profile(
         activities=[
             ProfilerActivity.CPU,
@@ -509,9 +511,9 @@ if do_profile := False:
         clear_input_grads()
         mod.zero_grad()
         do_fwdbwd_ = with_cudagraph_do_fwdbwd if wants_cudagraph else do_fwdbwd
-        do_fwdbwd_(orig)
+        do_fwdbwd_(mod)
         with prof:
-            do_fwdbwd_(orig)
+            do_fwdbwd_(mod)
         trace_dir = Path("out_trace_nanogpt")
         trace_dir.mkdir(exist_ok=True)
         profile_path = trace_dir / f"{label}.json"
@@ -530,7 +532,7 @@ if test_fwdbwd := False:
     with_cudagraph_do_fwdbwd(cg)
     torch.cuda.synchronize()
 
-if test_latency := True:
+if test_latency := False:
     warmup, rep = 25, 100
     orig_ms: float = do_bench(partial(do_fwdbwd, mod=orig), rep=rep, warmup=warmup, grad_to_none=inputs_to_none)
     cg_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=cg), rep=rep, warmup=warmup, grad_to_none=[*cg_grads_to_none, *inputs_to_none])
