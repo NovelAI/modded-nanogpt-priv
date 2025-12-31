@@ -26,6 +26,9 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
 
     di = runtime.driver.active.get_device_interface()
 
+    if grad_to_none is not None:
+        for x in grad_to_none:
+            x.grad = None
     fn()
     di.synchronize()
 
@@ -37,6 +40,9 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
     start_event.record()
     for _ in range(5):
         runtime.driver.active.clear_cache(cache)
+        if grad_to_none is not None:
+            for x in grad_to_none:
+                x.grad = None
         fn()
     end_event.record()
     di.synchronize()
@@ -49,6 +55,9 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
     end_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
     # Warm-up
     for _ in range(n_warmup):
+        if grad_to_none is not None:
+            for x in grad_to_none:
+                x.grad = None
         fn()
     # Benchmark
     for i in range(n_repeat):
