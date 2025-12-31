@@ -30,5 +30,16 @@
                 "PYTORCH_ALLOC_CONF": "expandable_segments:True",
             }
         },
+        {
+            "name": "Repro",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "repro",
+            "subProcess": false,
+            "justMyCode": false,
+            "env": {
+                "PYTORCH_ALLOC_CONF": "expandable_segments:True",
+            }
+        },
     ]
 }
