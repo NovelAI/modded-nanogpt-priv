@@ -422,6 +422,10 @@ orig = torch.compile(orig, dynamic=False, fullgraph=True)
 cg = torch.compile(cg, dynamic=False, fullgraph=True, mode='reduce-overhead')
 # next = torch.compile(next, dynamic=False, fullgraph=True, mode='reduce-overhead')
 
+ve = torch.randn((microbsz, dim), device=device, dtype=hp_dtype, requires_grad=True)
+sa_lambdas = torch.tensor((.5, 1.), device=device, requires_grad=True)
+
+input = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+1), requires_grad=True)
 target = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+2))
 
 def do_fwd(mod: CausalSelfAttentionBase):
@@ -503,10 +507,11 @@ if test_fwdbwd := False:
     cg.zero_grad()
 
 if test_latency := True:
+    inputs_to_none = [input, ve, sa_lambdas]
     warmup, rep = 25, 100
     orig_ms: float = do_bench(partial(do_fwdbwd, mod=orig), rep=rep, warmup=warmup)
     # next_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=next), rep=rep, warmup=warmup)
-    next_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=cg), rep=rep, warmup=warmup)
+    next_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=cg), rep=rep, warmup=warmup, grad_to_none=[*cg_grads_to_none, *inputs_to_none])
     orig_its: float = 1000 / orig_ms
     next_its: float = 1000 / next_ms
     print(f"""
