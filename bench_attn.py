@@ -497,7 +497,9 @@ def clear_input_grads():
     for t in inputs_to_none:
         t.grad = None
 
-if do_profile := False:
+if do_profile := True:
+    wait, warmup, active = 1, 3, 1
+    prof_its = wait + warmup + active
     prof = profile(
         activities=[
             ProfilerActivity.CPU,
@@ -506,16 +508,18 @@ if do_profile := False:
         record_shapes=False,
         # stack traces introduce sufficient CPU overhead as to mislead, so don't believe such profiles entirely.
         # with_stack=True,
+        schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active),
     )
+    torch.cuda.synchronize()
     for mod, label, wants_cudagraph in zip((orig, next, cg), ("orig", "next", "cg"), (False, True, True), strict=True):
-        clear_input_grads()
-        mod.zero_grad()
         do_fwdbwd_ = with_cudagraph_do_fwdbwd if wants_cudagraph else do_fwdbwd
-        do_fwdbwd_(mod)
-        clear_input_grads()
-        mod.zero_grad()
         with prof:
-            do_fwdbwd_(mod)
+            for step in range(prof_its):
+                clear_input_grads()
+                mod.zero_grad()
+                do_fwdbwd_(mod)
+                torch.cuda.synchronize()
+                prof.step()
         trace_dir = Path("out_trace_nanogpt")
         trace_dir.mkdir(exist_ok=True)
         profile_path = trace_dir / f"{label}.json"
@@ -534,7 +538,7 @@ if test_fwdbwd := False:
     with_cudagraph_do_fwdbwd(cg)
     torch.cuda.synchronize()
 
-if test_latency := True:
+if test_latency := False:
     warmup, rep = 25, 100
     orig_ms: float = do_bench(partial(do_fwdbwd, mod=orig), rep=rep, warmup=warmup, grad_to_none=inputs_to_none)
     cg_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=cg), rep=rep, warmup=warmup, grad_to_none=[*cg_grads_to_none, *inputs_to_none])
