@@ -15,7 +15,7 @@ from src.do_bench import do_bench
 # import torch._inductor.config
 # torch._inductor.config.triton.cudagraph_trees = False
 
-if use_fa3 := False:
+if use_fa3 := True:
     get_attn_out: Callable[[Tensor|tuple[Tensor, ...]], Tensor]
     if use_local_fa3_kernel := True:
         flash_attn_interface = get_local_kernel(repo_path=Path('hf-kernels/flash-attention-3'), package_name='flash_attention_3').flash_attn_interface
@@ -309,12 +309,10 @@ class CausalSelfAttentionCG(nn.Module):
             window_size_left=bm_size,
             window_size_right=0,
         )
-        y = q
         y = y.view(B, T, self.num_heads, self.head_dim)
         y = y * torch.sigmoid(self.attn_gate(x[..., :self.attn_gate.weight.size(-1)])).view(B, T, self.num_heads, 1)
         y = y.contiguous().view(B, T, self.num_heads * self.head_dim) # re-assemble all head outputs side by side
         y = F.linear(y, sa_lambdas[1] * self.o.weight.type_as(y))  # sa_lambdas[1] pre-multiplied to O @shenberg
-        y = y.view_as(x)
         return y
 
 class CausalSelfAttentionNext(CausalSelfAttentionOrig):
@@ -431,8 +429,6 @@ input = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator
 target = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+2))
 
 def do_fwd(mod: CausalSelfAttentionBase):
-    ve = torch.randn((microbsz, dim), device=device, dtype=hp_dtype, requires_grad=True)
-    sa_lambdas = torch.tensor((.5, 1.), device=device, requires_grad=True)
     attn_args = AttnArgs(
         ve=ve,
         sa_lambdas=sa_lambdas,
@@ -444,7 +440,6 @@ def do_fwd(mod: CausalSelfAttentionBase):
         # attn_scale=head_dim**-.5,
         key_shift=False
     )
-    input = torch.randn((1, microbsz, dim), device=device, dtype=hp_dtype, generator=gen.manual_seed(seed+1), requires_grad=True)
     out: Tensor = mod(input, attn_args=attn_args)
     return out
 
@@ -466,6 +461,7 @@ def with_cudagraph_do_fwdbwd(mod: nn.Module):
     out: Tensor = do_fwd(mod)
     loss: Tensor = loss_fn(out, target)
     loss.backward()
+    return loss
 
 if test_correctness := False:
     out_orig = do_fwd(orig)
@@ -511,8 +507,8 @@ if test_fwdbwd := False:
 if test_latency := True:
     inputs_to_none = [input, ve, sa_lambdas]
     warmup, rep = 25, 100
-    orig_ms: float = do_bench(partial(do_fwdbwd, mod=orig), rep=rep, warmup=warmup)
-    # next_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=next), rep=rep, warmup=warmup)
+    orig_ms: float = do_bench(partial(do_fwdbwd, mod=orig), rep=rep, warmup=warmup, grad_to_none=inputs_to_none)
+    # next_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=next), rep=rep, warmup=warmup, grad_to_none=[*next_grads_to_none, *inputs_to_none])
     next_ms: float = do_bench(partial(with_cudagraph_do_fwdbwd, mod=cg), rep=rep, warmup=warmup, grad_to_none=[*cg_grads_to_none, *inputs_to_none])
     orig_its: float = 1000 / orig_ms
     next_its: float = 1000 / next_ms
