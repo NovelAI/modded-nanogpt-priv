@@ -63,5 +63,15 @@
                 "PYTORCH_ALLOC_CONF": "expandable_segments:True",
             }
         },
+        {
+            "name": "Bench RMSNorm",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "bench_rmsnorm",
+            "subProcess": false,
+            "justMyCode": false,
+            "env": {
+            }
+        },
     ]
 }
