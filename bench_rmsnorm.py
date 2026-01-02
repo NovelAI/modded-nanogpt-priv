@@ -8,6 +8,7 @@ import torch
 from functools import partial
 from torch.testing import assert_close
 from torch.profiler import ProfilerActivity, profile
+from torch.nn.functional import rms_norm
 try:
     import compress_py
     cpy_found = True
@@ -121,6 +122,17 @@ def cudagraph_rmsnorm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     rms = torch.rsqrt(x_fp32.pow(2).mean(-1, keepdim=True) + 1e-5)
     return (x_fp32 * rms * weight).type_as(x)
 
+def rmsnorm_builtin_eager(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    return rms_norm(x.float(), normalized_shape=(x.shape[-1],), weight=weight, eps=1e-5).type_as(x)
+
+@torch.compile(mode="max-autotune", dynamic=False, fullgraph=True)
+def rmsnorm_builtin_compiled(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    return rms_norm(x.float(), normalized_shape=(x.shape[-1],), weight=weight, eps=1e-5).type_as(x)
+
+@torch.compile(mode="reduce-overhead", dynamic=False, fullgraph=True)
+def rmsnorm_builtin_cudagraph(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    return rms_norm(x.float(), normalized_shape=(x.shape[-1],), weight=weight, eps=1e-5).type_as(x)
+
 # I know it's not so beautiful that it requires a niladic function instead of passing arguments
 # but CPU overhead matters in a microbenchmark, and python 3.10 doesn't have a JIT, so I'll avoid doing arg-spreading in case it matters
 def with_step_begin(fn):
@@ -142,6 +154,9 @@ class StrategyName(Enum):
     Compiled = 'compiled'
     CudaGraph = 'cudagraph'
     Custom = 'custom'
+    BuiltinEager = 'builtin-eager'
+    BuiltinCompiled = 'builtin-compiled'
+    BuiltinCudaGraph = 'builtin-cudagraph'
 
 def main():
     device = torch.device('cuda')
@@ -149,12 +164,26 @@ def main():
     x = torch.randn((1024, 512), generator=gen.manual_seed(42), device=device).type(torch.float8_e4m3fn)
     weight = torch.randn((512), generator=gen.manual_seed(43), device=device)
 
-    if check_correctness := True:
+    if check_correctness := False:
         eager_out = rmsnorm_eager(x, weight)
         eager_out_float = eager_out.float()
+
+        builtin_out = rmsnorm_builtin_eager(x, weight)
+        assert_close(eager_out_float, builtin_out.float())
+        print("builtin_out is close to eager_out")
+
+        builtin_compiled_out = rmsnorm_builtin_compiled(x, weight)
+        assert_close(eager_out_float, builtin_compiled_out.float())
+        print("builtin_compiled_out is close to eager_out")
+
+        builtin_cudagraph_out = with_step_begin(partial(rmsnorm_builtin_cudagraph, x, weight))()
+        assert_close(eager_out_float, builtin_cudagraph_out.float())
+        print("builtin_cudagraph_out is close to eager_out")
+
         compiled_out = compiled_rmsnorm(x, weight)
         assert_close(eager_out_float, compiled_out.float())
         print("compiled_out is close to eager_out")
+
         cudagraph_out = with_step_begin(partial(cudagraph_rmsnorm, x, weight))()
         assert_close(eager_out_float, cudagraph_out.float())
         print("cudagraph_out is close to eager_out")
@@ -182,11 +211,17 @@ def main():
             partial(rmsnorm_eager, x, weight),
             partial(compiled_rmsnorm, x, weight),
             with_step_begin(partial(cudagraph_rmsnorm, x, weight)),
+            partial(rmsnorm_builtin_eager, x, weight),
+            partial(rmsnorm_builtin_compiled, x, weight),
+            with_step_begin(partial(rmsnorm_builtin_cudagraph, x, weight)),
             *(partial(rmsnorm_custom, x, weight),) * cpy_found,
         ), (
             StrategyName.Eager,
             StrategyName.Compiled,
             StrategyName.CudaGraph,
+            StrategyName.BuiltinEager,
+            StrategyName.BuiltinCompiled,
+            StrategyName.BuiltinCudaGraph,
             *(StrategyName.Custom,) * cpy_found,
         ), strict=True):
             with prof:
@@ -200,17 +235,20 @@ def main():
             print(f"Saving profile to {profile_path}")
             prof.export_chrome_trace(str(profile_path))
 
-    if do_benchmark := False:
+    if do_benchmark := True:
         warmup, rep = 1000, 2000
         bench_results: dict[StrategyName, BenchResult] = {}
         bench_results[StrategyName.Eager] = BenchResult(do_bench(partial(rmsnorm_eager, x, weight), rep=rep, warmup=warmup))
         bench_results[StrategyName.Compiled] = BenchResult(do_bench(partial(compiled_rmsnorm, x, weight), rep=rep, warmup=warmup))
         bench_results[StrategyName.CudaGraph] = BenchResult(do_bench(with_step_begin(partial(cudagraph_rmsnorm, x, weight)), rep=rep, warmup=warmup))
+        bench_results[StrategyName.BuiltinEager] = BenchResult(do_bench(partial(rmsnorm_builtin_eager, x, weight), rep=rep, warmup=warmup))
+        bench_results[StrategyName.BuiltinCompiled] = BenchResult(do_bench(partial(rmsnorm_builtin_compiled, x, weight), rep=rep, warmup=warmup))
+        bench_results[StrategyName.BuiltinCudaGraph] = BenchResult(do_bench(with_step_begin(partial(rmsnorm_builtin_cudagraph, x, weight)), rep=rep, warmup=warmup))
 
         if cpy_found:
             bench_results[StrategyName.Custom] = BenchResult(do_bench(partial(rmsnorm_custom, x, weight), rep=rep, warmup=warmup))
 
-        bench_result = "\n".join((f"{name.value.rjust(9)}:  {result.ms_per_iter:5.3f}ms  {result.iter_per_s/1000:6.2f}kit/s" for name, result in bench_results.items()))
+        bench_result = "\n".join((f"{name.value.rjust(17)}:  {result.ms_per_iter:5.3f}ms  {result.iter_per_s/1000:6.2f}kit/s" for name, result in bench_results.items()))
         print(bench_result)
 
 
