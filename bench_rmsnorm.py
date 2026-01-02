@@ -102,7 +102,7 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
 def rmsnorm_eager(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     x_fp32 = x.float()
     rms = torch.rsqrt(x_fp32.pow(2).mean(-1, keepdim=True) + 1e-5)
-    return torch.addcmul(x_fp32, rms, weight).type_as(x)
+    return (x_fp32 * rms * weight).type_as(x)
 
 
 def rmsnorm_custom(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -113,13 +113,13 @@ def rmsnorm_custom(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 def compiled_rmsnorm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     x_fp32 = x.float()
     rms = torch.rsqrt(x_fp32.pow(2).mean(-1, keepdim=True) + 1e-5)
-    return torch.addcmul(x_fp32, rms, weight).type_as(x)
+    return (x_fp32 * rms * weight).type_as(x)
 
 @torch.compile(mode="reduce-overhead", dynamic=False, fullgraph=True)
 def cudagraph_rmsnorm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     x_fp32 = x.float()
     rms = torch.rsqrt(x_fp32.pow(2).mean(-1, keepdim=True) + 1e-5)
-    return torch.addcmul(x_fp32, rms, weight).type_as(x)
+    return (x_fp32 * rms * weight).type_as(x)
 
 # I know it's not so beautiful that it requires a niladic function instead of passing arguments
 # but CPU overhead matters in a microbenchmark, and python 3.10 doesn't have a JIT, so I'll avoid doing arg-spreading in case it matters
@@ -149,7 +149,7 @@ def main():
     x = torch.randn((1024, 512), generator=gen.manual_seed(42), device=device).type(torch.float8_e4m3fn)
     weight = torch.randn((512), generator=gen.manual_seed(43), device=device)
 
-    if check_correctness := False:
+    if check_correctness := True:
         eager_out = rmsnorm_eager(x, weight)
         eager_out_float = eager_out.float()
         compiled_out = compiled_rmsnorm(x, weight)
@@ -200,7 +200,7 @@ def main():
             print(f"Saving profile to {profile_path}")
             prof.export_chrome_trace(str(profile_path))
 
-    if do_benchmark := True:
+    if do_benchmark := False:
         warmup, rep = 1000, 2000
         bench_results: dict[StrategyName, BenchResult] = {}
         bench_results[StrategyName.Eager] = BenchResult(do_bench(partial(rmsnorm_eager, x, weight), rep=rep, warmup=warmup))
