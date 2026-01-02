@@ -102,7 +102,7 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
 def rmsnorm_eager(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     x_fp32 = x.float()
     rms = torch.rsqrt(x_fp32.pow(2).mean(-1, keepdim=True) + 1e-5)
-    return (x_fp32 * rms * weight).type_as(x)
+    return torch.addcmul(x_fp32, rms, weight).type_as(x)
 
 
 def rmsnorm_custom(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -113,13 +113,21 @@ def rmsnorm_custom(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 def compiled_rmsnorm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     x_fp32 = x.float()
     rms = torch.rsqrt(x_fp32.pow(2).mean(-1, keepdim=True) + 1e-5)
-    return (x_fp32 * rms * weight).type_as(x)
+    return torch.addcmul(x_fp32, rms, weight).type_as(x)
 
 @torch.compile(mode="reduce-overhead", dynamic=False, fullgraph=True)
 def cudagraph_rmsnorm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     x_fp32 = x.float()
     rms = torch.rsqrt(x_fp32.pow(2).mean(-1, keepdim=True) + 1e-5)
-    return (x_fp32 * rms * weight).type_as(x)
+    return torch.addcmul(x_fp32, rms, weight).type_as(x)
+
+# I know it's not so beautiful that it requires a niladic function instead of passing arguments
+# but CPU overhead matters in a microbenchmark, and python 3.10 doesn't have a JIT, so I'll avoid doing arg-spreading in case it matters
+def with_step_begin(fn):
+    def better_fn():
+        torch.compiler.cudagraph_mark_step_begin()
+        return fn()
+    return better_fn
 
 @dataclass
 class BenchResult:
@@ -143,11 +151,11 @@ def main():
 
     if check_correctness := False:
         eager_out = rmsnorm_eager(x, weight)
-        compiled_out = compiled_rmsnorm(x, weight)
-        cudagraph_out = cudagraph_rmsnorm(x, weight)
         eager_out_float = eager_out.float()
+        compiled_out = compiled_rmsnorm(x, weight)
         assert_close(eager_out_float, compiled_out.float())
         print("compiled_out is close to eager_out")
+        cudagraph_out = with_step_begin(partial(cudagraph_rmsnorm, x, weight))()
         assert_close(eager_out_float, cudagraph_out.float())
         print("cudagraph_out is close to eager_out")
 
@@ -170,27 +178,20 @@ def main():
             schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active),
         )
         torch.cuda.synchronize()
-        for fn, label, wants_cudagraph in zip((
-            rmsnorm_eager,
-            compiled_rmsnorm,
-            cudagraph_rmsnorm,
-            *(rmsnorm_custom,) * cpy_found,
+        for fn, label in zip((
+            partial(rmsnorm_eager, x, weight),
+            partial(compiled_rmsnorm, x, weight),
+            with_step_begin(partial(cudagraph_rmsnorm, x, weight)),
+            *(partial(rmsnorm_custom, x, weight),) * cpy_found,
         ), (
             StrategyName.Eager,
             StrategyName.Compiled,
             StrategyName.CudaGraph,
             *(StrategyName.Custom,) * cpy_found,
-        ), (
-            False,
-            False,
-            True,
-            *(False,) * cpy_found,
         ), strict=True):
             with prof:
                 for _ in range(prof_its):
-                    if wants_cudagraph:
-                        torch.compiler.cudagraph_mark_step_begin()
-                    fn(x, weight)
+                    fn()
                     torch.cuda.synchronize()
                     prof.step()
             trace_dir = Path("out_trace_rmsnorm")
@@ -204,12 +205,12 @@ def main():
         bench_results: dict[StrategyName, BenchResult] = {}
         bench_results[StrategyName.Eager] = BenchResult(do_bench(partial(rmsnorm_eager, x, weight), rep=rep, warmup=warmup))
         bench_results[StrategyName.Compiled] = BenchResult(do_bench(partial(compiled_rmsnorm, x, weight), rep=rep, warmup=warmup))
-        bench_results[StrategyName.CudaGraph] = BenchResult(do_bench(partial(cudagraph_rmsnorm, x, weight), rep=rep, warmup=warmup))
+        bench_results[StrategyName.CudaGraph] = BenchResult(do_bench(with_step_begin(partial(cudagraph_rmsnorm, x, weight)), rep=rep, warmup=warmup))
 
         if cpy_found:
             bench_results[StrategyName.Custom] = BenchResult(do_bench(partial(rmsnorm_custom, x, weight), rep=rep, warmup=warmup))
 
-        bench_result = "\n".join((f"{name.value.rjust(9)}:  {result.ms_per_iter:5.3f}ms  {result.iter_per_s:12.2f}it/s" for name, result in bench_results.items()))
+        bench_result = "\n".join((f"{name.value.rjust(9)}:  {result.ms_per_iter:5.3f}ms  {result.iter_per_s/1000:6.2f}kit/s" for name, result in bench_results.items()))
         print(bench_result)
 
 
