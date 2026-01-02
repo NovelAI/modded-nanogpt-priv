@@ -151,10 +151,12 @@ class BenchResult:
 
 class StrategyName(Enum):
     Eager = 'eager'
+    EagerGraph = 'eagergraph'
     Compiled = 'compiled'
     CudaGraph = 'cudagraph'
     Custom = 'custom'
     BuiltinEager = 'builtin-eager'
+    BuiltinEagerGraph = 'builtin-eagergraph'
     BuiltinCompiled = 'builtin-compiled'
     BuiltinCudaGraph = 'builtin-cudagraph'
 
@@ -167,6 +169,20 @@ def main():
     if check_correctness := False:
         eager_out = rmsnorm_eager(x, weight)
         eager_out_float = eager_out.float()
+
+        with torch.cuda.stream(torch.cuda.Stream()):
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                graph_out = rmsnorm_eager(x, weight)
+        g.replay()
+        assert_close(eager_out_float, graph_out.float())
+
+        with torch.cuda.stream(torch.cuda.Stream()):
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                builtin_graph_out = rmsnorm_builtin_eager(x, weight)
+        g.replay()
+        assert_close(eager_out_float, builtin_graph_out.float())
 
         builtin_out = rmsnorm_builtin_eager(x, weight)
         assert_close(eager_out_float, builtin_out.float())
@@ -193,7 +209,7 @@ def main():
             assert_close(eager_out_float, custom_out.float())
             print("custom_out is close to eager_out")
 
-    if do_profile := False:
+    if do_profile := True:
         wait, warmup, active = 1, 1, 1
         prof_its = wait + warmup + active
         prof = profile(
@@ -209,25 +225,37 @@ def main():
         torch.cuda.synchronize()
         for fn, label in zip((
             partial(rmsnorm_eager, x, weight),
+            partial(rmsnorm_eager, x, weight),
             partial(compiled_rmsnorm, x, weight),
             with_step_begin(partial(cudagraph_rmsnorm, x, weight)),
+            partial(rmsnorm_builtin_eager, x, weight),
             partial(rmsnorm_builtin_eager, x, weight),
             partial(rmsnorm_builtin_compiled, x, weight),
             with_step_begin(partial(rmsnorm_builtin_cudagraph, x, weight)),
             *(partial(rmsnorm_custom, x, weight),) * cpy_found,
         ), (
             StrategyName.Eager,
+            StrategyName.EagerGraph,
             StrategyName.Compiled,
             StrategyName.CudaGraph,
             StrategyName.BuiltinEager,
+            StrategyName.BuiltinEagerGraph,
             StrategyName.BuiltinCompiled,
             StrategyName.BuiltinCudaGraph,
             *(StrategyName.Custom,) * cpy_found,
         ), strict=True):
+            wants_eagergraph = label in (StrategyName.EagerGraph, StrategyName.BuiltinEagerGraph)
             with prof:
-                for _ in range(prof_its):
-                    fn()
-                    torch.cuda.synchronize()
+                for step in range(prof_its):
+                    if wants_eagergraph and step == 0:
+                        with torch.cuda.stream(torch.cuda.Stream()):
+                            g = torch.cuda.CUDAGraph()
+                            with torch.cuda.graph(g):
+                                fn()
+                        fn = g.replay
+                    else:
+                        fn()
+                        torch.cuda.synchronize()
                     prof.step()
             trace_dir = Path("out_trace_rmsnorm")
             trace_dir.mkdir(exist_ok=True)
@@ -235,20 +263,31 @@ def main():
             print(f"Saving profile to {profile_path}")
             prof.export_chrome_trace(str(profile_path))
 
-    if do_benchmark := True:
+    if do_benchmark := False:
         warmup, rep = 1000, 2000
         bench_results: dict[StrategyName, BenchResult] = {}
+        with torch.cuda.stream(torch.cuda.Stream()):
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                rmsnorm_eager(x, weight)
+        
+        bench_results[StrategyName.EagerGraph] = BenchResult(do_bench(g.replay, rep=rep, warmup=warmup))
         bench_results[StrategyName.Eager] = BenchResult(do_bench(partial(rmsnorm_eager, x, weight), rep=rep, warmup=warmup))
         bench_results[StrategyName.Compiled] = BenchResult(do_bench(partial(compiled_rmsnorm, x, weight), rep=rep, warmup=warmup))
         bench_results[StrategyName.CudaGraph] = BenchResult(do_bench(with_step_begin(partial(cudagraph_rmsnorm, x, weight)), rep=rep, warmup=warmup))
         bench_results[StrategyName.BuiltinEager] = BenchResult(do_bench(partial(rmsnorm_builtin_eager, x, weight), rep=rep, warmup=warmup))
+        with torch.cuda.stream(torch.cuda.Stream()):
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                rmsnorm_builtin_eager(x, weight)
+        bench_results[StrategyName.BuiltinEagerGraph] = BenchResult(do_bench(g.replay, rep=rep, warmup=warmup))
         bench_results[StrategyName.BuiltinCompiled] = BenchResult(do_bench(partial(rmsnorm_builtin_compiled, x, weight), rep=rep, warmup=warmup))
         bench_results[StrategyName.BuiltinCudaGraph] = BenchResult(do_bench(with_step_begin(partial(rmsnorm_builtin_cudagraph, x, weight)), rep=rep, warmup=warmup))
 
         if cpy_found:
             bench_results[StrategyName.Custom] = BenchResult(do_bench(partial(rmsnorm_custom, x, weight), rep=rep, warmup=warmup))
 
-        bench_result = "\n".join((f"{name.value.rjust(17)}:  {result.ms_per_iter:5.3f}ms  {result.iter_per_s/1000:6.2f}kit/s" for name, result in bench_results.items()))
+        bench_result = "\n".join((f"{name.value.rjust(18)}:  {result.ms_per_iter:5.3f}ms  {result.iter_per_s/1000:6.2f}kit/s" for name, result in bench_results.items()))
         print(bench_result)
 
 
